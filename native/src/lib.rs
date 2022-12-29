@@ -101,7 +101,7 @@ pub struct DataStream {
     /// Reference to the PeerConnection to keep around
     peer_con: Option<Arc<Mutex<Box<RtcPeerConnection<ConnInternal>>>>>,
     /// Reference to the outbound piper
-    handle: Option<JoinHandle<()>>,
+    handle: Option<Arc<Mutex<JoinHandle<()>>>>,
 }
 
 impl DataStream {
@@ -191,7 +191,7 @@ impl AsyncWrite for DataStream {
 pub struct PeerConnection {
     peer_con: Arc<Mutex<Box<RtcPeerConnection<ConnInternal>>>>,
     rx_incoming: mpsc::Receiver<DataStream>,
-    handle: JoinHandle<()>,
+    handle: Arc<Mutex<JoinHandle<()>>>,
 }
 
 impl PeerConnection {
@@ -211,7 +211,7 @@ impl PeerConnection {
             },
         )?));
         let pc = peer_con.clone();
-        let handle = tokio::spawn(async move {
+        let handle = Arc::new(Mutex::new(tokio::spawn(async move {
             while let Some(m) = sig_rx.next().await {
                 if let Err(err) = match m {
                     Message::RemoteDescription(i) => pc.lock().set_remote_description(&i),
@@ -220,7 +220,7 @@ impl PeerConnection {
                     error!(?err, "Error interacting with RtcPeerConnection");
                 }
             }
-        });
+        })));
         Ok(Self {
             peer_con,
             rx_incoming,
@@ -229,15 +229,15 @@ impl PeerConnection {
     }
 
     /// Wait for an inbound connection.
-    pub async fn accept(mut self) -> anyhow::Result<DataStream> {
+    pub async fn accept(&mut self) -> anyhow::Result<DataStream> {
         let mut s = self.rx_incoming.next().await.context("Tx dropped")?;
-        s.handle = Some(self.handle);
-        s.peer_con = Some(self.peer_con);
+        s.handle = Some(self.handle.clone());
+        s.peer_con = Some(self.peer_con.clone());
         Ok(s)
     }
 
     /// Initiate an outbound dialing.
-    pub async fn dial(self, label: &str) -> anyhow::Result<DataStream> {
+    pub async fn dial(&self, label: &str) -> anyhow::Result<DataStream> {
         let (mut ready, rx_inbound, chan) = DataChannel::new();
         let dc = self.peer_con.lock().create_data_channel(label, chan)?;
         ready.next().await.context("Tx dropped")??;
@@ -245,14 +245,14 @@ impl PeerConnection {
             inner: dc,
             rx_inbound,
             buf_inbound: vec![],
-            handle: Some(self.handle),
-            peer_con: Some(self.peer_con),
+            handle: Some(self.handle.clone()),
+            peer_con: Some(self.peer_con.clone()),
         })
     }
 
     /// Initiate an outbound dialing with extra options.
     pub async fn dial_ex(
-        self,
+        &self,
         label: &str,
         dc_init: &DataChannelInit,
     ) -> anyhow::Result<DataStream> {
@@ -266,8 +266,8 @@ impl PeerConnection {
             inner: dc,
             rx_inbound,
             buf_inbound: vec![],
-            handle: Some(self.handle),
-            peer_con: Some(self.peer_con),
+            handle: Some(self.handle.clone()),
+            peer_con: Some(self.peer_con.clone()),
         })
     }
 }
