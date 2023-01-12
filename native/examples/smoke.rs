@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use async_datachannel::{Message, PeerConnection, RtcConfig};
 use async_tungstenite::{tokio::connect_async, tungstenite};
@@ -80,23 +80,63 @@ async fn main() -> anyhow::Result<()> {
     };
 
     tokio::spawn(f_read);
-    let mut dc = if peer_to_dial.is_some() {
+
+    let bytes_to_transfer = 500 * 1000 * 1000;
+    let mut buf: [u8; 512] = [0; 512];
+
+    let check = true;
+
+    if peer_to_dial.is_some() {
         let mut dc = listener.dial("whatever").await?;
         info!("dial succeed");
 
-        dc.write_all(b"Ping").await?;
-        dc
+        let mut transferred = 0;
+        let mut value: u8 = 0; // next value to write to the buffer
+        while transferred < bytes_to_transfer {
+            let write_bytes = std::cmp::min(bytes_to_transfer - transferred, buf.len());
+            if check {
+                for c in 0..write_bytes {
+                    buf[c] = value;
+                    value = (value + 1) % 251;
+                }
+            }
+            dc.write_all(&buf[0..write_bytes]).await?;
+            transferred += write_bytes;
+            let remaining = bytes_to_transfer - transferred;
+            println!("sent {write_bytes} bytes, remaining {remaining}");
+        }
+        info!("waiting ack");
+        let _n = dc.read(&mut buf[0..1]).await?;
+        info!("done and done");
     } else {
-        let dc = listener.accept().await?;
+        let mut dc = listener.accept().await?;
         info!("accept succeed");
-        dc
-    };
-    let mut buf = vec![0; 32];
 
-    loop {
-        let n = dc.read(&mut buf).await?;
-        println!("Read: \"{}\"", String::from_utf8_lossy(&buf[..n]));
-        dc.write_all(b"Ping").await?;
-        tokio::time::sleep(Duration::from_secs(2)).await;
-    }
+        let mut transferred = 0;
+        let mut value: u8 = 0; // next value to expect from the buffer
+
+        while transferred < bytes_to_transfer {
+            let n = dc.read(&mut buf).await?;
+            if check {
+                for c in 0..n {
+                    if buf[c] != value {
+                        eprintln!(
+                            "EXPECTED {value}, RECEIVED {buf} at {pos}",
+                            buf = buf[c],
+                            pos = transferred + c
+                        );
+                        value = buf[c];
+                    }
+                    value = (value + 1) % 251;
+                }
+            }
+            transferred += n;
+            let remaining = bytes_to_transfer - transferred;
+            println!("read {n} bytes, remaining {remaining}");
+        }
+        println!("read all, sending ack");
+        dc.write_all(&buf[0..1]).await?;
+    };
+
+    Ok(())
 }
