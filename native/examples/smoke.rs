@@ -121,9 +121,8 @@ async fn main() -> anyhow::Result<()> {
                 for c in 0..n {
                     if buf[c] != value {
                         eprintln!(
-                            "EXPECTED {value}, RECEIVED {buf} at {pos}",
+                            "EXPECTED {value}, RECEIVED {buf} at {transferred}+{c}",
                             buf = buf[c],
-                            pos = transferred + c
                         );
                         value = buf[c];
                     }
