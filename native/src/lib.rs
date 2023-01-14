@@ -33,17 +33,17 @@ pub enum Message {
 
 struct DataChannel {
     tx_ready: mpsc::Sender<anyhow::Result<()>>,
-    tx_inbound: mpsc::Sender<anyhow::Result<Vec<u8>>>,
+    tx_inbound: mpsc::UnboundedSender<anyhow::Result<Vec<u8>>>,
 }
 #[allow(clippy::type_complexity)]
 impl DataChannel {
     fn new() -> (
         mpsc::Receiver<anyhow::Result<()>>,
-        mpsc::Receiver<anyhow::Result<Vec<u8>>>,
+        mpsc::UnboundedReceiver<anyhow::Result<Vec<u8>>>,
         Self,
     ) {
         let (tx_ready, rx_ready) = mpsc::channel(1);
-        let (tx_inbound, rx_inbound) = mpsc::channel(128);
+        let (tx_inbound, rx_inbound) = mpsc::unbounded();
         (
             rx_ready,
             rx_inbound,
@@ -64,22 +64,24 @@ impl DataChannelHandler for DataChannel {
 
     fn on_closed(&mut self) {
         debug!("on_closed");
-        let _ = self.tx_inbound.try_send(Err(anyhow::anyhow!("Closed")));
+        self.tx_inbound
+            .unbounded_send(Err(anyhow::anyhow!("Closed")))
+            .unwrap();
     }
 
     fn on_error(&mut self, err: &str) {
         let _ = self
             .tx_ready
             .try_send(Err(anyhow::anyhow!(err.to_string())));
-        let _ = self
-            .tx_inbound
-            .try_send(Err(anyhow::anyhow!(err.to_string())));
+        self.tx_inbound
+            .unbounded_send(Err(anyhow::anyhow!(err.to_string())))
+            .unwrap();
     }
 
     fn on_message(&mut self, msg: &[u8]) {
         let s = String::from_utf8_lossy(msg);
         debug!("on_message {}", s);
-        let _ = self.tx_inbound.try_send(Ok(msg.to_vec()));
+        self.tx_inbound.unbounded_send(Ok(msg.to_vec())).unwrap();
     }
 
     // TODO?
@@ -95,7 +97,7 @@ pub struct DataStream {
     /// The actual data channel
     inner: Box<RtcDataChannel<DataChannel>>,
     /// Receiver for inbound bytes from the data channel
-    rx_inbound: mpsc::Receiver<anyhow::Result<Vec<u8>>>,
+    rx_inbound: mpsc::UnboundedReceiver<anyhow::Result<Vec<u8>>>,
     /// Intermediate buffer of inbound bytes, to be polled by `poll_read`
     buf_inbound: Vec<u8>,
     /// Reference to the PeerConnection to keep around
@@ -275,7 +277,7 @@ impl PeerConnection {
 struct ConnInternal {
     tx_incoming: mpsc::Sender<DataStream>,
     tx_signal: mpsc::Sender<Message>,
-    pending: Option<mpsc::Receiver<anyhow::Result<Vec<u8>>>>,
+    pending: Option<mpsc::UnboundedReceiver<anyhow::Result<Vec<u8>>>>,
 }
 
 impl PeerConnectionHandler for ConnInternal {
