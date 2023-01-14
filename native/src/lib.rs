@@ -13,11 +13,12 @@ use datachannel::{
 use futures::{
     channel::mpsc,
     io::{AsyncRead, AsyncWrite},
-    StreamExt,
+    SinkExt, StreamExt,
 };
 use parking_lot::Mutex;
 #[cfg(feature = "derive")]
 use serde::{Deserialize, Serialize};
+use tokio::runtime::Runtime;
 use tokio::task::JoinHandle;
 use tracing::{debug, error};
 
@@ -34,10 +35,13 @@ pub enum Message {
 struct DataChannel {
     tx_ready: mpsc::Sender<anyhow::Result<()>>,
     tx_inbound: mpsc::Sender<anyhow::Result<Vec<u8>>>,
+    runtime: Arc<Mutex<Option<Runtime>>>, // for making use of block_on
 }
 #[allow(clippy::type_complexity)]
 impl DataChannel {
-    fn new() -> (
+    fn new(
+        runtime: Runtime,
+    ) -> (
         mpsc::Receiver<anyhow::Result<()>>,
         mpsc::Receiver<anyhow::Result<Vec<u8>>>,
         Self,
@@ -50,6 +54,7 @@ impl DataChannel {
             Self {
                 tx_ready,
                 tx_inbound,
+                runtime: Arc::new(Mutex::new(Some(runtime))),
             },
         )
     }
@@ -63,23 +68,37 @@ impl DataChannelHandler for DataChannel {
     }
 
     fn on_closed(&mut self) {
-        debug!("on_closed");
-        let _ = self.tx_inbound.try_send(Err(anyhow::anyhow!("Closed")));
+        let mut tx_inbound = self.tx_inbound.clone();
+        // TODO: cannot use runtime.block_on here, unless we use tokio::spawn?
+        tx_inbound.try_send(Err(anyhow::anyhow!("Closed"))).unwrap(); // TODO: signal error somehow
     }
 
     fn on_error(&mut self, err: &str) {
         let _ = self
             .tx_ready
             .try_send(Err(anyhow::anyhow!(err.to_string())));
-        let _ = self
-            .tx_inbound
-            .try_send(Err(anyhow::anyhow!(err.to_string())));
+        let mut tx_inbound = self.tx_inbound.clone();
+        let runtime = self.runtime.lock();
+        if let Some(runtime) = &*runtime {
+            runtime.block_on(async {
+                tx_inbound
+                    .send(Err(anyhow::anyhow!(err.to_string())))
+                    .await
+                    .unwrap(); // TODO: signal error somehow
+            });
+        }
     }
 
     fn on_message(&mut self, msg: &[u8]) {
         let s = String::from_utf8_lossy(msg);
         debug!("on_message {}", s);
-        let _ = self.tx_inbound.try_send(Ok(msg.to_vec()));
+        let mut tx_inbound = self.tx_inbound.clone();
+        let runtime = self.runtime.lock();
+        if let Some(runtime) = &*runtime {
+            runtime.block_on(async {
+                tx_inbound.send(Ok(msg.to_vec())).await.unwrap(); // TODO: signal error somehow
+            });
+        }
     }
 
     // TODO?
@@ -87,6 +106,19 @@ impl DataChannelHandler for DataChannel {
 
     fn on_available(&mut self) {
         debug!("on_available");
+    }
+}
+
+impl Drop for DataChannel {
+    fn drop(&mut self) {
+        // The tokio runtime cannot be dropped from async context (which we most likely are in
+        // when we are dropping this object), so we need to put it to another thread where it
+        // will be dropped later.
+        // TODO: should we do something about the channels?
+        let runtime = self.runtime.lock().take();
+        tokio::task::spawn_blocking(move || {
+            drop(runtime);
+        });
     }
 }
 
@@ -238,7 +270,7 @@ impl PeerConnection {
 
     /// Initiate an outbound dialing.
     pub async fn dial(&self, label: &str) -> anyhow::Result<DataStream> {
-        let (mut ready, rx_inbound, chan) = DataChannel::new();
+        let (mut ready, rx_inbound, chan) = DataChannel::new(Runtime::new()?);
         let dc = self.peer_con.lock().create_data_channel(label, chan)?;
         ready.next().await.context("Tx dropped")??;
         Ok(DataStream {
@@ -256,7 +288,7 @@ impl PeerConnection {
         label: &str,
         dc_init: &DataChannelInit,
     ) -> anyhow::Result<DataStream> {
-        let (mut ready, rx_inbound, chan) = DataChannel::new();
+        let (mut ready, rx_inbound, chan) = DataChannel::new(Runtime::new()?);
         let dc = self
             .peer_con
             .lock()
@@ -282,7 +314,7 @@ impl PeerConnectionHandler for ConnInternal {
     type DCH = DataChannel;
 
     fn data_channel_handler(&mut self, _info: DataChannelInfo) -> Self::DCH {
-        let (_, rx, dc) = DataChannel::new();
+        let (_, rx, dc) = DataChannel::new(Runtime::new().unwrap()); // TODO: signal error somehow
         self.pending.replace(rx);
         dc
     }
