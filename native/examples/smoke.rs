@@ -90,6 +90,7 @@ async fn main() -> anyhow::Result<()> {
         let mut dc = listener.dial("whatever").await?;
         info!("dial succeed");
 
+        let mut frame = 0;
         let mut transferred = 0;
         let mut value: u8 = 0; // next value to write to the buffer
         while transferred < bytes_to_transfer {
@@ -101,9 +102,10 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             dc.write_all(&buf[0..write_bytes]).await?;
+            frame += 1;
             transferred += write_bytes;
             let remaining = bytes_to_transfer - transferred;
-            println!("sent {write_bytes} bytes, remaining {remaining}");
+            println!("sent {write_bytes} bytes, remaining {remaining} at frame {frame}");
         }
         info!("waiting ack");
         let _n = dc.read(&mut buf[0..1]).await?;
@@ -112,16 +114,18 @@ async fn main() -> anyhow::Result<()> {
         let mut dc = listener.accept().await?;
         info!("accept succeed");
 
+        let mut frame = 0;
         let mut transferred = 0;
         let mut value: u8 = 0; // next value to expect from the buffer
 
         while transferred < bytes_to_transfer {
             let n = dc.read(&mut buf).await?;
+            frame += 1;
             if check {
                 for c in 0..n {
                     if buf[c] != value {
                         eprintln!(
-                            "EXPECTED {value}, RECEIVED {buf} at {transferred}+{c}",
+                            "EXPECTED {value}, RECEIVED {buf} at {transferred}+{c} at frame {frame}",
                             buf = buf[c],
                         );
                         value = buf[c];
@@ -131,7 +135,7 @@ async fn main() -> anyhow::Result<()> {
             }
             transferred += n;
             let remaining = bytes_to_transfer - transferred;
-            println!("read {n} bytes, remaining {remaining}");
+            println!("read {n} bytes, remaining {remaining} at frame {frame}");
         }
         println!("read all, sending ack");
         dc.write_all(&buf[0..1]).await?;
